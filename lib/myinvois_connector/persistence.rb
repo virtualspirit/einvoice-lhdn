@@ -16,6 +16,7 @@ module MyInvoisConnector
     autoload :Record, "myinvois_connector/persistence/record"
     autoload :SubmissionIntent, "myinvois_connector/persistence/submission_intent"
     autoload :SourceAcknowledgment, "myinvois_connector/persistence/source_acknowledgment"
+    autoload :Dispatcher, "myinvois_connector/persistence/dispatcher"
 
     class LifecycleError < MyInvoisConnector::Error; end
 

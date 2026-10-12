@@ -44,8 +44,9 @@ module MyInvoisConnector
       end
 
       def acknowledge!(source_owner:)
+        observed = verified_acknowledgment(source_owner)
         with_lock do
-          observed = verified_acknowledgment(source_owner)
+          verify_observation_binding!(observed)
           if ready?
             raise LifecycleError.new("source_acknowledgment_changed"), cause: nil unless acknowledgment == observed.token
             next
@@ -65,10 +66,14 @@ module MyInvoisConnector
         if self.class.connection.transaction_open?
           raise LifecycleError.new("claim_requires_own_transaction"), cause: nil
         end
+        # Observe committed host state before opening the engine transaction.
+        # A host may share this connection pool. The trusted role guarantees
+        # immutable bindings and no release before matching terminal evidence.
+        observed = verified_acknowledgment(source_owner) if ready?
         claimed = false
         with_lock do
           if ready?
-            observed = verified_acknowledgment(source_owner)
+            verify_observation_binding!(observed)
             raise LifecycleError.new("source_acknowledgment_changed"), cause: nil unless acknowledgment == observed.token
             owned_write do
               self.attempted_at = Time.now.utc
@@ -133,10 +138,14 @@ module MyInvoisConnector
         # Implemented by a trusted host role. Must reject a reservation still
         # inside a host transaction or unavailable/unconfirmed source storage.
         observed = source_owner.acknowledgment_for(self)
+        verify_observation_binding!(observed)
+        observed
+      end
+
+      def verify_observation_binding!(observed)
         unless observed.instance_of?(SourceAcknowledgment) && observed.matches?(self)
           raise LifecycleError.new("source_acknowledgment_mismatch"), cause: nil
         end
-        observed
       end
 
       def owned_write

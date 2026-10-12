@@ -13,6 +13,8 @@ require "json"
 require "open3"
 require "rbconfig"
 require "minitest/test"
+require "webmock/minitest"
+WebMock.disable_net_connect!
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "myinvois_connector/persistence"
 
@@ -98,14 +100,125 @@ class PersistenceIntegrationTest < Minitest::Test
   Persistence = MyInvoisConnector::Persistence
   Intent = Persistence::SubmissionIntent
   Ack = Persistence::SourceAcknowledgment
+  HOST = "https://preprod-api.myinvois.hasil.gov.my"
+  SUBMIT_URL = "#{HOST}/api/v1.0/documentsubmissions/"
+
+  def dispatch_client(environment: :sandbox)
+    stub_request(:post, "#{HOST}/connect/token").to_return(status: 200, body: {
+      access_token: "fictional-token", token_type: "Bearer", expires_in: 3600
+    }.to_json)
+    MyInvoisConnector::Client.new(client_id: "fictional-client", client_secret: "fictional-secret",
+      represented_taxpayer: "DEMOONLY", environment: environment)
+  end
+
+  def dispatch(client = dispatch_client)
+    Persistence::Dispatcher.call(intent: @intent, client: client, source_owner: @owner)
+  end
+
+  def test_dispatch_commits_before_transport_and_repeated_delivery_never_resends
+    each_storage_mode do
+      WebMock.reset!
+      ready
+      request = stub_request(:post, SUBMIT_URL).with(body: @submission.body).to_return do
+        refute HostRecord.connection.transaction_open?
+        refute EngineRecord.connection.transaction_open?
+        assert Intent.find(@intent.id).attempting?
+        { status: 202, body: { submissionUid: "BATCH001",
+          acceptedDocuments: [{ uuid: "DEMO001", invoiceCodeNumber: "DEMO-A" }],
+          rejectedDocuments: [{ invoiceCodeNumber: "DEMO-B", error: { code: "Invalid" } }] }.to_json }
+      end
+      assert_same @intent, dispatch
+      assert @intent.reload.accepted?
+      assert_equal "BATCH001", @intent.submission_uid
+      assert_equal 1, @intent.receipt_data.fetch("rejectedDocuments").size
+      assert_same @intent, dispatch
+      assert_requested request, times: 1
+      assert Reservation.exists?(intent_uuid: @intent.intent_uuid)
+    end
+  end
+
+  def test_dispatch_timeout_retains_uncertainty_and_does_not_resend
+    each_storage_mode do
+      WebMock.reset!
+      ready
+      request = stub_request(:post, SUBMIT_URL).to_timeout
+      assert_raises(MyInvoisConnector::UncertainResultError) { dispatch }
+      assert @intent.reload.uncertain?
+      assert_equal "write_transport_uncertain", @intent.last_error_code
+      dispatch
+      assert_requested request, times: 1
+      assert Reservation.exists?(intent_uuid: @intent.intent_uuid)
+    end
+  end
+
+  def test_dispatch_result_storage_outage_keeps_attempt_and_never_resends
+    each_storage_mode do
+      WebMock.reset!
+      ready
+      request = stub_request(:post, SUBMIT_URL).to_return(status: 202, body: {
+        submissionUid: "BATCH001", acceptedDocuments: [{ uuid: "DEMO001", invoiceCodeNumber: "DEMO-A" },
+          { uuid: "DEMO002", invoiceCodeNumber: "DEMO-B" }], rejectedDocuments: [] }.to_json)
+      def @intent.record_receipt!(**)
+        raise ActiveRecord::ConnectionNotEstablished, "fictional private storage detail"
+      end
+      def @intent.mark_uncertain!(**)
+        raise ActiveRecord::ConnectionNotEstablished, "fictional private storage detail"
+      end
+      error = assert_raises(Persistence::LifecycleError) { dispatch }
+      assert_equal "dispatch_result_unrecorded", error.code
+      assert_nil error.cause
+      refute_includes error.full_message, "private storage detail"
+      assert @intent.reload.attempting?
+      dispatch
+      assert_requested request, times: 1
+    end
+  end
+
+  def test_dispatch_refuses_environment_mismatch_and_open_transactions_before_transport
+    each_storage_mode do
+      WebMock.reset!
+      ready
+      request = stub_request(:post, SUBMIT_URL)
+      error = assert_raises(Persistence::LifecycleError) { dispatch(dispatch_client(environment: :production)) }
+      assert_equal "dispatch_environment_mismatch", error.code
+      assert @intent.reload.ready?
+      HostRecord.transaction { assert_raises(Persistence::LifecycleError) { dispatch } }
+      EngineRecord.transaction { assert_raises(Persistence::LifecycleError) { dispatch } }
+      assert @intent.reload.ready?
+      assert_nil @intent.attempted_at
+      assert_not_requested request
+    end
+  end
+
+  def test_dispatch_corrupted_storage_never_claims_or_sends
+    each_storage_mode do
+      WebMock.reset!
+      ready
+      request = stub_request(:post, SUBMIT_URL)
+      # Simulate a storage integrity fault through task-only administrative SQL.
+      Intent.connection.execute("UPDATE lhdn_submission_intents SET request_hash = #{Intent.connection.quote('0' * 64)} WHERE id = #{Integer(@intent.id)}")
+      @intent.reload
+      error = assert_raises(Persistence::LifecycleError) { dispatch }
+      assert_equal "dispatch_snapshot_invalid", error.code
+      assert @intent.reload.ready?
+      assert_nil @intent.attempted_at
+      assert_not_requested request
+    end
+  end
 
   def each_storage_mode
-    Databases::CREATED.each_with_index do |name, index|
+    [*Databases::CREATED, Databases::CREATED.first].each_with_index do |name, index|
+      EngineRecord.connection_specification_name = EngineRecord.name
       EngineRecord.establish_connection(Databases.config(name))
+      if index == 2
+        EngineRecord.remove_connection
+        EngineRecord.connection_specification_name = HostRecord.connection_specification_name
+      end
       Intent.reset_column_information
       Intent.delete_all # Task fixture reset only, never a product retention path.
       Reservation.delete_all
-      @mode = index.zero? ? "same database" : "separate database"
+      @mode = ["same database, separate pools", "separate database", "same database, shared pool"].fetch(index)
+      assert_same HostRecord.connection, EngineRecord.connection if index == 2
       @owner = SourceOwner.new
       @submission = MyInvoisConnector::Submission.new(documents: %w[DEMO-A DEMO-B].map do |code|
         MyInvoisConnector::SubmissionDocument.new(bytes: "<Invoice>Fictional</Invoice>", format: "XML", code_number: code)

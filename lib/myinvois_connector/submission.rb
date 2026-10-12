@@ -11,6 +11,32 @@ module MyInvoisConnector
 
     attr_reader :documents, :body
 
+    # Restore a previously prepared envelope without altering its final bytes.
+    # Canonical equality also rejects duplicate JSON keys and unknown fields.
+    def self.restore(body:)
+      unless body.is_a?(String) && body.bytesize.between?(1, MAX_BYTES)
+        raise ArgumentError, "invalid stored submission"
+      end
+      data = JSON.parse(body)
+      raise ArgumentError unless data.is_a?(Hash) && data.keys == ["documents"]
+      values = data.fetch("documents")
+      raise ArgumentError unless values.is_a?(Array) && values.size.between?(1, MAX_DOCUMENTS)
+      documents = values.map do |value|
+        unless value.is_a?(Hash) && value.keys.sort == %w[codeNumber document documentHash format]
+          raise ArgumentError
+        end
+        document = SubmissionDocument.new(bytes: Base64.strict_decode64(value.fetch("document")),
+          format: value.fetch("format"), code_number: value.fetch("codeNumber"))
+        raise ArgumentError unless document.document_hash == value.fetch("documentHash")
+        document
+      end
+      restored = new(documents: documents)
+      raise ArgumentError unless restored.body == body
+      restored
+    rescue JSON::ParserError, ArgumentError, TypeError, KeyError
+      raise ArgumentError, "invalid stored submission", cause: nil
+    end
+
     def initialize(documents:)
       unless documents.is_a?(Array) && documents.size.between?(1, MAX_DOCUMENTS)
         raise ArgumentError, "submission must contain between 1 and 100 documents"

@@ -24,6 +24,30 @@ class ConnectorTest < Minitest::Test
     refute_match(/\s/, wire.fetch("document"))
   end
 
+  def test_restoration_preserves_canonical_envelope_and_exact_document_bytes
+    bytes = "<Invoice>\r\n測試 café\n</Invoice>".b
+    submission = MyInvoisConnector::Submission.new(documents: [document(bytes: bytes)])
+    restored = MyInvoisConnector::Submission.restore(body: submission.body)
+    assert_equal submission.body, restored.body
+    assert_equal bytes, restored.documents.first.bytes
+    assert restored.frozen?
+    assert restored.body.frozen?
+  end
+
+  def test_restoration_rejects_corruption_and_noncanonical_envelopes_without_payload_errors
+    submission = MyInvoisConnector::Submission.new(documents: [document])
+    changed = JSON.parse(submission.body)
+    changed["documents"].first["documentHash"] = "0" * 64
+    candidates = ["private fixture{", "{}", "null", "[]", JSON.generate(changed),
+      JSON.pretty_generate(JSON.parse(submission.body)), submission.body.sub('"XML"', '"PDF"'),
+      submission.body.sub('"documents":', '"documents":[],"documents":')]
+    candidates.each do |body|
+      error = assert_raises(ArgumentError) { MyInvoisConnector::Submission.restore(body: body) }
+      assert_equal "invalid stored submission", error.message
+      assert_nil error.cause
+    end
+  end
+
   def test_caller_cannot_change_the_document_or_batch_after_creation
     bytes = +"<Invoice/>"
     number = +"DEMO-001"

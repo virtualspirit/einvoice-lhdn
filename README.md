@@ -2,7 +2,7 @@
 
 An independently packaged Ruby connector foundation. Requires Ruby 3.0.3 or later and Faraday 2.7–2.x. It is not yet integrated into event_backend.
 
-Install from the private repository using your organization's existing GitHub authentication:
+Install from the public GitHub repository:
 
 ```ruby
 gem "einvoice-lhdn", git: "https://github.com/virtualspirit/einvoice-lhdn.git"
@@ -35,7 +35,9 @@ Tokens are reused only within that client instance, protected by a mutex and pro
 
 `UncertainResultError` means a write may have reached the provider: retain the source lock and reconcile rather than resend. `DuplicateSubmissionError` is an uncertain-result subtype with any provider retry hint; a hint does not authorize automatic resubmission. Preflight authentication failures are distinct from write-attempt failures. No automatic POST/PUT retry is performed. Cancel reasons must contain1–300 characters; the engine/host must enforce validation-time windows, reference chains and represented-taxpayer authority.
 
-This slice provides no UBL generation, schema/signature verification, recipient rejection API, database persistence, background jobs or source locking. Envelope construction is not evidence that a document is eligible, signed, accepted or Valid. Host dispatch must pass the engine/host readiness, permission and source-lock gates. Do not log document bytes, request bodies or returned taxpayer/document data. Responses are bounded after transport; streaming download limits remain future work.
+Optional Rails persistence stores immutable request intents, source acknowledgments, durable attempt claims and initial receipts. See [persistence setup](docs/persistence.md). Ordinary connector requires do not load Rails. This is a request-intent foundation, not a complete per-document archive or workflow.
+
+This slice provides no UBL generation, schema/signature verification, recipient rejection API, background jobs or host source locking. Envelope construction is not evidence that a document is eligible, signed, accepted or Valid. Host dispatch must pass the engine/host readiness, permission and source-lock gates. Do not log document bytes, request bodies or returned taxpayer/document data. Responses are bounded after transport; streaming download limits remain future work.
 
 Run offline tests from this repository:
 
@@ -44,4 +46,4 @@ bundle install
 bundle exec rake test
 ```
 
-Protocol sources: [Submit Documents](https://sdk.myinvois.hasil.gov.my/einvoicingapi/02-submit-documents/), [type codes](https://sdk.myinvois.hasil.gov.my/codes/e-invoice-types/). See [implementation status](docs/status.md) for coverage and limitations. Checked 2026-10-12. This private package is not licensed or approved for public publication.
+Protocol sources: [Submit Documents](https://sdk.myinvois.hasil.gov.my/einvoicingapi/02-submit-documents/), [type codes](https://sdk.myinvois.hasil.gov.my/codes/e-invoice-types/). See [implementation status](docs/status.md) for coverage and limitations. Checked 2026-10-12. The owner made this repository public; no license has been assigned and RubyGems publication remains disabled.

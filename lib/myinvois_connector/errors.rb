@@ -20,4 +20,6 @@ module MyInvoisConnector
   class NetworkError < Error; end
   class NotFoundError < Error; end
   class InvalidRequestError < Error; end
+  class UncertainResultError < Error; end
+  class DuplicateSubmissionError < UncertainResultError; end
 end
